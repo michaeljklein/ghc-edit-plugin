@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/michaeljklein/ghc-edit-plugin.svg?branch=master)](https://travis-ci.org/michaeljklein/ghc-edit-plugin)
+
 # ghc-edit-plugin
 
 Create GHC plugins using composable `Lens`-like source edits.
