@@ -5,18 +5,41 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveLift #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Control.Edit.HsModule where
 
 import BasicTypes
 import Control.Applicative
 import Control.Edit
+import Control.Edit.HsModule.Parse
+import Control.Edit.TH
 import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Writer
+import Control.Monad.Trans.State.Strict
+import qualified Control.Monad.Trans.Class
+import Data.Set (Set)
+import Data.Foldable
 import FastString
+import FieldLabel
 import GHC
 import HscTypes
-import Name
+import qualified Name
 import SrcLoc
+import Control.Monad.IO.Class
+import Control.Monad
+import Control.Arrow
+import DynFlags
+import Outputable hiding (empty, (<>))
+import RdrName
+
+import Language.Haskell.TH.Syntax
+import Data.List
+import Data.Map (Map)
+import qualified Data.Map as Map
 
 -- | `HsDecl` to `TyClDecl` or `Nothing` otherwise
 tyClDecl :: HsDecl p -> Maybe (TyClDecl p)
@@ -39,23 +62,112 @@ tyClDeclTypeName DataDecl {..} = Just (DataTypeName, tcdLName)
 tyClDeclTypeName ClassDecl {..} = Just (DataTypeName, tcdLName)
 tyClDeclTypeName _ = Nothing
 
--- | Edit the `Located` `HsModule` in a `HsParsedModule`
-editHsParsedModuleModule :: Located (HsModule GhcPs) >- HsParsedModule
-editHsParsedModuleModule f HsParsedModule {..} =
-  MaybeT $ do
-    mhpm_module <- runMaybeT $ f hpm_module
-    return $ do
-      hpm_module' <- mhpm_module
-      return $ HsParsedModule {hpm_module = hpm_module', ..}
+$(editRecordFields ''HsParsedModule)
+$(editRecordFields ''HsModule)
 
--- | Edit the `LHsDecl`'s in a `HsModule`
-editHsmodDecls :: [LHsDecl pass] >- HsModule pass
-editHsmodDecls f HsModule {..} =
-  MaybeT $ do
-    mhsmodDecls <- runMaybeT $ f hsmodDecls
-    return $ do
-      hsmodDecls' <- mhsmodDecls
-      return $ HsModule {hsmodDecls = hsmodDecls', ..}
+-- | Given an info `FastString` for `Located`, parse a list of
+-- @`ImportDecl` `GhcPs`@'s in `String` form, e.g.
+-- @"import Data.Bool (bool)"@
+--
+-- This uses `parseImportDecl` for parsing.
+--
+-- The resulting import declarations are passed to `mergeWithLImportDecls`,
+-- which merges one list of @`ImportDecl` `GhcPs`@' into another.
+parseMergeWithLImportDecls :: FastString -> [String] -> Edited [LImportDecl GhcPs]
+parseMergeWithLImportDecls info newImportDeclStrs = Edited . Kleisli $ \importDecls' -> do
+  newImportDecls <- liftIO $ mapM (runGHC . parseImportDecl) newImportDeclStrs
+  (runKleisli . runEdited) (mergeWithLImportDecls info newImportDecls) importDecls'
+
+-- | Make an `Edited` that merges a list of @`ImportDecl` GhcPs`@ into another,
+-- given an information string to provide to `mkGeneralSrcSpan`
+mergeWithLImportDecls :: FastString -> [ImportDecl GhcPs] -> Edited [LImportDecl GhcPs]
+mergeWithLImportDecls info newImportDecls = Edited . Kleisli $ \xs -> execWriterT $ do
+  (>>= tell) . fmap (fmap (L (mkGeneralSrcSpan info)) . toList) . flip execStateT newImportDeclMap . forM_ xs $ \x -> do
+    newImportDeclMap' <- get
+    let xId = importId $ unLocated x
+    case Map.lookup xId newImportDeclMap' of
+      Nothing -> Control.Monad.Trans.Class.lift . tell $ [x]
+      ~(Just y) -> do
+        put $ Map.delete xId newImportDeclMap'
+        Control.Monad.Trans.Class.lift . tell $ [mergeImportDecl info (unLocated x) y <$ x]
+  where
+    importId :: ImportDecl GhcPs -> (Bool, Maybe Bool, Maybe StringLiteral, Maybe ModuleName, ModuleName)
+    importId = liftM5 (,,,,) ideclQualified (fmap fst . ideclHiding) ideclPkgQual (fmap unLocated . ideclAs) (unLocated . ideclName)
+
+    newImportDeclMap :: Map (Bool, Maybe Bool, Maybe StringLiteral, Maybe ModuleName, ModuleName) (ImportDecl GhcPs)
+    newImportDeclMap = Map.fromList $ first importId . join (,) <$> newImportDecls
+
+-- | Apply `mergeLIEs` to the `ideclHiding`'s of two @`ImportDecl` `GhcPs`@'s,
+-- if they're both `Just`, otherwise keep the second before the first.
+mergeImportDecl :: FastString -> ImportDecl GhcPs -> ImportDecl GhcPs -> ImportDecl GhcPs
+mergeImportDecl info xs ys =
+  xs {
+    ideclHiding = (do
+      ~(hiding, xs') <- ideclHiding xs
+      ~(_, ys') <- ideclHiding ys
+      return (hiding, mergeLIEs info (unLocated xs') (unLocated ys') <$ xs')
+      ) <|> ideclHiding ys
+        <|> ideclHiding xs
+  }
+
+-- | Apply `mergeLIE` to each @`LIE` `GhcPs`@ in the first list
+mergeLIEs :: FastString -> [LIE GhcPs] -> [LIE GhcPs] -> [LIE GhcPs]
+mergeLIEs _ [] = id
+mergeLIEs info ~(x:xs) = mergeLIEs info xs . mergeLIE info x
+
+-- | Merge two @`LIE` `GhcPs`@'s by looking for the equivalent case,
+-- overwriting it if it's just a name or something that can't be merged and
+-- otherwise merging the contents.
+mergeLIE :: FastString -> LIE GhcPs -> [LIE GhcPs] -> [LIE GhcPs]
+mergeLIE _ x [] = [x]
+mergeLIE info x ~(y:ys) =
+  case unLocated x of
+    IEVar       xie _ ->
+      case unLocated y of
+        IEVar _ lieWrappedName' -> loc (IEVar  xie lieWrappedName') : ys
+        _ -> y : mergeLIE info x ys
+    IEThingAbs xie _ ->
+      case unLocated y of
+        IEThingAbs _ lieWrappedName' -> loc (IEThingAbs xie lieWrappedName') : ys
+        _ -> y : mergeLIE info x ys
+    IEThingAll xie _ ->
+      case unLocated y of
+        IEThingAll _ lieWrappedName' -> loc (IEThingAll xie lieWrappedName') : ys
+        _ -> y : mergeLIE info x ys
+    IEThingWith xie _ _ names labels ->
+      case unLocated y of
+        IEThingWith _ lieWrappedName' wild' names' labels' ->
+          loc (IEThingWith xie lieWrappedName' wild' (union names names') (union labels labels')) : ys
+        _ -> y : mergeLIE info x ys
+    IEModuleContents       xie _ ->
+      case unLocated y of
+        IEModuleContents _ lieWrappedName' -> loc (IEModuleContents xie lieWrappedName') : ys
+        _ -> y : mergeLIE info x ys
+    IEGroup       xie _ _ ->
+      case unLocated y of
+        IEGroup _ i' str' -> loc (IEGroup xie i' str') : ys
+        _ -> y : mergeLIE info x ys
+    IEDoc       xie _ ->
+      case unLocated y of
+        IEDoc _ lieWrappedName' -> loc (IEDoc xie lieWrappedName') : ys
+        _ -> y : mergeLIE info x ys
+    IEDocNamed       xie _ ->
+      case unLocated y of
+        IEDocNamed _ lieWrappedName' -> loc (IEDocNamed xie lieWrappedName') : ys
+        _ -> y : mergeLIE info x ys
+    XIE _ -> y:ys
+  where
+    loc = L $ mkGeneralSrcSpan info
+
+deriving instance Ord SourceText
+deriving instance Ord StringLiteral
+
+-- deriving instance Ord a => Ord (IEWrappedName a)
+-- deriving instance Ord IEWildcard
+-- deriving instance Ord a => Ord (FieldLbl a)
+-- instance Ord HsDocString where
+--   compare x y = unpackHDS x `compare` unpackHDS y
+
 
 -- | If for each `LHsDecl`, we can return an `EditM` list of them,
 -- we can edit a `HsModule`
@@ -125,7 +237,7 @@ spliceApp infoStr fId xId = HsUntypedSplice NoExt HasParens spliceId $ L info sp
     info = mkGeneralSrcSpan infoStr
 
     spliceId :: IdP GhcPs
-    spliceId = Unqual $ mkOccName varName "splice"
+    spliceId = Unqual $ Name.mkOccName Name.varName "splice"
 
     spliceExpr' :: HsExpr GhcPs
     spliceExpr' = HsApp NoExt  fs xs
@@ -136,23 +248,10 @@ spliceApp infoStr fId xId = HsUntypedSplice NoExt HasParens spliceId $ L info sp
     xs :: LHsExpr GhcPs
     xs = L info . HsBracket NoExt $ VarBr NoExt False xId
 
--- data HsParsedModule = HsParsedModule {
---     hpm_module    :: Located (HsModule GhcPs),
---     hpm_src_files :: [FilePath],
---        -- ^ extra source files (e.g. from #includes).  The lexer collects
---        -- these from '# <file> <line>' pragmas, which the C preprocessor
---        -- leaves behind.  These files and their timestamps are stored in
---        -- the .hi file, so that we can force recompilation if any of
---        -- them change (#3589)
---     hpm_annotations :: ApiAnns
---     -- See note [Api annotations] in ApiAnnotation.hs
---   }
-
 
 
 -- foo :: DynFlags -> [LHsDecl GhcPs] -> String
 -- foo fs = unlines . fmap (foos fs . unLocated)
-
 
 -- foos :: DynFlags -> HsDecl GhcPs -> String
 -- foos fg (SpliceD _ xs@(SpliceDecl _ (L _ ys@(HsUntypedSplice _ sd (Unqual idP') (L _ zs@(HsApp _ fs@(L _ (HsVar _ _)) args@(L _ (HsBracket _ (VarBr _ b _))))))) sef)) =
@@ -638,4 +737,38 @@ spliceApp infoStr fId xId = HsUntypedSplice NoExt HasParens spliceId $ L info sp
 
 
 
+-- | Parse an import declaration, e.g.
+-- @$(`parseImportDeclE` "import Data.Maybe (mapMaybe)") :: `ImportDecl` `GhcPs`@
+--
+-- See `parseImportDecl`
+-- parseImportDeclE :: String -> Q Exp
+-- parseImportDeclE = (>>= lift) . liftIO . runGHC . parseImportDecl
+
+-- deriving instance Lift (ImportDecl GhcPs)
+-- deriving instance (Lift a, Lift b) => Lift (GenLocated a b)
+-- deriving instance Lift RdrName
+-- deriving instance Lift (IE GhcPs)
+-- deriving instance Lift NoExt
+-- deriving instance Lift SourceText
+-- deriving instance Lift a => Lift (IEWrappedName a)
+-- deriving instance Lift a => Lift (FieldLbl a)
+-- deriving instance Lift SrcSpan
+-- deriving instance Lift IEWildcard
+-- deriving instance Lift StringLiteral
+
+-- instance Lift HsDocString where
+-- instance Lift FastString where
+
+-- instance Lift Name.Name where
+-- instance Lift GHC.Module where
+-- instance Lift Name.OccName where
+
+-- instance Lift RealSrcSpan where
+--   lift = _
+
+-- instance Lift ModuleName where
+--   lift = _
+
+-- parseImportDeclE :: String -> Q Exp
+-- parseImportDeclE = (>>= lift) . liftIO . runGHC . parseImportDecl
 

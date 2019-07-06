@@ -41,6 +41,7 @@ setup-info:
         sha256: 563e34bb2d8a48fa5630136c5acc059bab0e807bf4f02b23d0fbc75f38500feb
 extra-deps:
 - ghc-paths-0.1.0.8
+- sop-core-0.5.0.0
 compiler-check: match-exact
 compiler: ghc-8.8.0.20190424
 resolver: ghc-8.8.0.20190424

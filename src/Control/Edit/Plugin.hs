@@ -1,5 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Control.Edit.Plugin where
 
@@ -9,7 +10,8 @@ import Control.Edit.HsModule
 import Control.Monad.Trans.Maybe
 import Data.Maybe
 import FastString
-import GhcPlugins
+import GhcPlugins hiding ((<>))
+import HsExtension
 
 -- | Convert an `Edited` to an `impurePlugin`
 editToPlugin :: ([CommandLineOption] -> ModSummary -> Edited HsParsedModule) -> Plugin
@@ -39,6 +41,17 @@ tyClDeclTypeNameSplicesPlugin ::
   -> Plugin
 tyClDeclTypeNameSplicesPlugin f =
   editToPlugin $ \_ _ ->
-    editHsParsedModuleModule `runEdit`
+    editHsParsedModulehpm_module `runEdit`
     editedLocated (addTyClDeclTypeNameSpliceFunctions f)
+
+tyClDeclTypeNameSpliceWithImports ::
+     FastString
+  -> (TyClDeclTypeName -> EditM [(FastString, IdP GhcPs)])
+  -> [String]
+  -> Plugin
+tyClDeclTypeNameSpliceWithImports info spliceFunc importStrs =
+  editToPlugin $ \_ _ ->
+    runEdit editHsParsedModulehpm_module . editedLocated $
+    addTyClDeclTypeNameSpliceFunctions spliceFunc <> editHsModulehsmodImports `runEdit`
+    parseMergeWithLImportDecls info importStrs
 

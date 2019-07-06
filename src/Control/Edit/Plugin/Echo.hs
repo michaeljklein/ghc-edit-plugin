@@ -10,7 +10,7 @@ import GhcPlugins
 plugin :: Plugin
 plugin =
   editToPlugin $ \_ _ ->
-    editHsParsedModuleModule `runEdit`
+    editHsParsedModulehpm_module `runEdit`
     editedLocated
       (addTyClDeclTypeNameSplices
          (curry $

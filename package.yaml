@@ -13,6 +13,9 @@ dependencies:
 - ghc
 - ghc-paths
 - transformers
+- template-haskell
+- ghc-prim
+- containers
 
 library:
   source-dirs: src

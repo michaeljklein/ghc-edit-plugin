@@ -15,6 +15,18 @@ editToPlugin :: ([CommandLineOption] -> ModSummary -> Edited HsParsedModule) -> 
 ```
 
 
+## Control.Edit.HsModule
+
+Make a splice for `addTyClDeclTypeNameSplices` by using `spliceApp`
+with the given TH function names, applied to each `TyClDecl` name.
+
+```haskell
+addTyClDeclTypeNameSpliceFunctions ::
+     (TyClDeclTypeName -> EditM [(FastString, IdP GhcPs)])
+  -> Edited (HsModule GhcPs)
+```
+
+
 ### Example Plugin
 
 An example plugin is provided in `Control.Edit.Plugin.Echo`:
