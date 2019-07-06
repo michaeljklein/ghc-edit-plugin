@@ -4,10 +4,10 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: c6ed3b9b119d84f79e9fd9acf7781218d85a21091e954ae065d7a886c9a0d14b
+-- hash: 5191af606b51faf2c3362e014f540c6d19fa2a6c9f74f7beb8f150a2a93d9bc3
 
 name:           ghc-edit-plugin
-version:        0.1.0.0
+version:        0.1.1.0
 description:    Please see the README on GitHub at <https://github.com/michaeljklein/ghc-edit-plugin#readme>
 homepage:       https://github.com/michaeljklein/ghc-edit-plugin#readme
 bug-reports:    https://github.com/michaeljklein/ghc-edit-plugin/issues

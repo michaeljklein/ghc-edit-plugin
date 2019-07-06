@@ -1,5 +1,5 @@
 name:                ghc-edit-plugin
-version:             0.1.0.0
+version:             0.1.1.0
 github:              "michaeljklein/ghc-edit-plugin"
 license:             BSD3
 author:              "Michael J. Klein"
