@@ -13,6 +13,9 @@ import FastString
 import GhcPlugins hiding ((<>))
 import HsExtension
 
+import DriverPhases
+
+
 -- | Convert an `Edited` to an `impurePlugin`
 editToPlugin :: ([CommandLineOption] -> ModSummary -> Edited HsParsedModule) -> Plugin
 editToPlugin editedHsModule =
@@ -20,6 +23,17 @@ editToPlugin editedHsModule =
     pluginRecompile = impurePlugin
   , parsedResultAction = editToParsedResultAction editedHsModule
   }
+
+-- | Ignore @hs-boot@ and @hs-sig@ files
+ignoringHsBootOrSig ::
+     ([CommandLineOption] -> ModSummary -> Edited HsParsedModule)
+  -> [CommandLineOption]
+  -> ModSummary
+  -> Edited HsParsedModule
+ignoringHsBootOrSig f cmdOpts' modSummary'@ModSummary {..} =
+  if isHsBootOrSig ms_hsc_src
+    then mempty
+    else f cmdOpts' modSummary'
 
 -- | Convert an `Edited` to a `parsedResultAction`
 editToParsedResultAction ::
@@ -40,17 +54,19 @@ tyClDeclTypeNameSplicesPlugin ::
      (TyClDeclTypeName -> EditM [(FastString, RdrName)])
   -> Plugin
 tyClDeclTypeNameSplicesPlugin f =
-  editToPlugin $ \_ _ ->
+  editToPlugin . ignoringHsBootOrSig $ \_ _ ->
     editHsParsedModulehpm_module `runEdit`
     editedLocated (addTyClDeclTypeNameSpliceFunctions f)
 
+-- | `tyClDeclTypeNameSplicesPlugin` where you may provide a list of imports
+-- as well as an informational `FastString`: see `parseMergeWithLImportDecls`
 tyClDeclTypeNameSpliceWithImports ::
      FastString
   -> (TyClDeclTypeName -> EditM [(FastString, IdP GhcPs)])
   -> [String]
   -> Plugin
 tyClDeclTypeNameSpliceWithImports info spliceFunc importStrs =
-  editToPlugin $ \_ _ ->
+  editToPlugin . ignoringHsBootOrSig $ \_ _ ->
     runEdit editHsParsedModulehpm_module . editedLocated $
     addTyClDeclTypeNameSpliceFunctions spliceFunc <> editHsModulehsmodImports `runEdit`
     parseMergeWithLImportDecls info importStrs
