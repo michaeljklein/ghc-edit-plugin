@@ -14,11 +14,14 @@ module Control.Edit where
 import Control.Applicative
 import Control.Arrow (Kleisli(..))
 import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
 import Data.Bifunctor
 import Data.Maybe
 import Data.Set (Set)
 import Data.Set.Utils
+import DynFlags
 import GHC
 import HscTypes
 import Plugins
@@ -70,8 +73,13 @@ getEditedValue = EditedM $ Kleisli noEditM
 effectEdited :: (s -> ReaderT EditCxt Hsc a) -> EditedM s a
 effectEdited f = EditedM . Kleisli $ \x -> EditM . fmap (, Nothing) $ f x
 
+-- | Hoist for the internal `Monad` of a `Kleisli` arrow
 hoistKleisli :: (forall x. m x -> n x) -> Kleisli m a b -> Kleisli n a b
 hoistKleisli f = Kleisli . (f <$>) . runKleisli
+
+-- | Lift a `Hsc` action to `EditedM`
+liftHsc :: Hsc a -> EditedM t a
+liftHsc = EditedM . Kleisli . const . EditM . lift . fmap (, Nothing)
 
 instance Functor (EditedM t) where
   fmap f = EditedM . hoistKleisli (first f) . runEditedM
@@ -93,6 +101,12 @@ instance Monad (EditedM t) where
           ((fmap runEditM . runKleisli . runEditedM $ f xs') x)
           (fmap runEditM . runKleisli . runEditedM $ f xs')
           y
+
+instance MonadIO (EditedM t) where
+  liftIO = liftHsc . liftIO
+
+instance HasDynFlags (EditedM t) where
+  getDynFlags = liftHsc getDynFlags
 
 instance Semigroup a => Semigroup (EditedM t a) where
   (<>) = liftA2 (<>)

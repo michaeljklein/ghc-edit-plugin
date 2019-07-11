@@ -8,7 +8,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DeriveLift #-}
 
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-orphans -fno-warn-missing-signatures #-}
 
 module Control.Edit.HsModule where
 
@@ -27,7 +27,6 @@ import Control.Monad.IO.Class
 import Control.Monad
 import Control.Arrow (Kleisli(..))
 
-import Language.Haskell.TH.Syntax
 import Data.List
 import Data.Bifunctor
 import Data.Map (Map)
