@@ -214,7 +214,7 @@ addTyClDeclSplices ::
 addTyClDeclSplices f =
   void . addSplices $ \hsDecl' ->
     case tyClDecl hsDecl' of
-      Nothing -> EditM $ return ((), Nothing)
+      Nothing -> noEditM ()
       ~(Just tyClDecl') -> f tyClDecl'
 
 -- | Run `tyClDeclTypeName` on the `TyClDecl` in `addTyClDeclSplices`
@@ -225,7 +225,7 @@ addTyClDeclTypeNameSplices ::
 addTyClDeclTypeNameSplices f =
   addTyClDeclSplices $ \tyClDecl' ->
     case tyClDeclTypeName tyClDecl' of
-      Nothing -> EditM $ return ((), Nothing)
+      Nothing -> noEditM ()
       ~(Just tyClDeclTypeName') -> uncurry f tyClDeclTypeName'
 
 -- | Make a splice for `addTyClDeclTypeNameSplices` by using `spliceApp`

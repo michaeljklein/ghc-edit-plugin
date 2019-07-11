@@ -64,7 +64,7 @@ getEditedCxt = EditedM . Kleisli . const . EditM $ (, Nothing) <$> ask
 
 -- | Get the value being edited
 getEditedValue :: EditedM t t
-getEditedValue = EditedM . Kleisli $ EditM . return . (, Nothing)
+getEditedValue = EditedM $ Kleisli noEditM
 
 -- | Perform an action that may depend on the value, but don't edit anything
 effectEdited :: (s -> ReaderT EditCxt Hsc a) -> EditedM s a
