@@ -1,55 +1,40 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Control.Edit.TH where
 
-import GHC
+-- import Control.Edit.HsModule
 import Control.Edit
 import Control.Monad
--- import Control.Edit.HsModule
 import Control.Monad.Trans.Maybe
-import Language.Haskell.TH
-import qualified Language.Haskell.TH as TH
-import Language.Haskell.TH.Syntax
 import Data.Maybe
+import GHC
+import Language.Haskell.TH
+import Language.Haskell.TH.Syntax
+import qualified Language.Haskell.TH as TH
 
--- editRecordConField :: TH.Name -> TH.Name -> Q Dec
--- editRecordConField = _
+editRecordField :: (t -> s) -> (t -> s -> t) -> s >- t
+editRecordField getField' putField' f xs =
+  EditM . (fmap . fmap . fmap) (putField' xs) . runEditM . f $ getField' xs
+
+-- | Resulting type is: @(record -> field -> record)@
+putRecordFieldE :: TH.Name -> Q Exp
+putRecordFieldE fieldName = do
+  recVarName <- newName "recVar"
+  fieldVarName <- newName "fieldVar"
+  lamE [varP recVarName, varP fieldVarName] $
+    recUpdE (varE recVarName) [(,) fieldName <$> varE fieldVarName]
 
 editRecordConField :: TH.Name -> TH.Name -> Q Dec
 editRecordConField conName fieldName = do
   let editorName = mkName $ "edit" ++ nameBase conName ++ nameBase fieldName
-  fName <- newName "f"
-  xsName <- newName "xs"
-  ysName <- newName "ys"
-  funD editorName [
-    clause
-      [varP fName, varP xsName]
-      (normalB (appE
-                  [e|MaybeT|]
-                  (appE
-                     (appE
-                        [|fmap|]
-                        (appE
-                           [|fmap|]
-                           (lamE
-                              [varP ysName]
-                              (recUpdE
-                                 (varE xsName)
-                                 [return (fieldName, VarE ysName)]))))
-                     (appE
-                        [e|runMaybeT|]
-                        (appE
-                           (unboundVarE fName)
-                           (appE (varE fieldName) (varE xsName))
-                        )
-                     )
-                  )
-               )
-      )
-      []
-    ]
+  valD
+    (varP editorName)
+    (normalB $
+     [|editRecordField|] `appE` varE fieldName `appE` putRecordFieldE fieldName)
+    []
 
 editRecordFieldHelper :: String
 editRecordFieldHelper = $(do
@@ -94,13 +79,4 @@ editRecordFields recordName = do
             mapM (uncurry editRecordConFields) (maybeRecCs constructors)
         _ -> fail "editRecordFields: Expected DataD"
     _ -> fail "editRecordFields: Expected TyConI"
-
--- | Edit the `LHsDecl`'s in a `HsModule`
-editHsmodDecls :: [LHsDecl pass] >- HsModule pass
-editHsmodDecls f HsModule {..} =
-  MaybeT $ do
-    mhsmodDecls <- runMaybeT $ f hsmodDecls
-    return $ do
-      hsmodDecls' <- mhsmodDecls
-      return $ HsModule {hsmodDecls = hsmodDecls', ..}
 

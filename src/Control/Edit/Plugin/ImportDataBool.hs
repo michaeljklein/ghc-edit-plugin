@@ -6,8 +6,6 @@ import Control.Edit.Plugin
 import FastString
 import GhcPlugins
 
-import Control.Edit.Plugin.TyDeclNames
-
 plugin :: Plugin
 plugin =
   editToPlugin $ \_ _ ->

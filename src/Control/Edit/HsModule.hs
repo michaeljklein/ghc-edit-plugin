@@ -17,27 +17,19 @@ import Control.Applicative
 import Control.Edit
 import Control.Edit.HsModule.Parse
 import Control.Edit.TH
-import Control.Monad.Trans.Maybe
-import Control.Monad.Trans.Writer
-import Control.Monad.Trans.State.Strict
-import qualified Control.Monad.Trans.Class
-import Data.Set (Set)
 import Data.Foldable
 import FastString
-import FieldLabel
 import GHC
 import HscTypes
 import qualified Name
 import SrcLoc
 import Control.Monad.IO.Class
 import Control.Monad
-import Control.Arrow
-import DynFlags
-import Outputable hiding (empty, (<>))
-import RdrName
+import Control.Arrow (Kleisli(..))
 
 import Language.Haskell.TH.Syntax
 import Data.List
+import Data.Bifunctor
 import Data.Map (Map)
 import qualified Data.Map as Map
 
@@ -73,29 +65,54 @@ $(editRecordFields ''HsModule)
 --
 -- The resulting import declarations are passed to `mergeWithLImportDecls`,
 -- which merges one list of @`ImportDecl` `GhcPs`@' into another.
-parseMergeWithLImportDecls :: FastString -> [String] -> Edited [LImportDecl GhcPs]
-parseMergeWithLImportDecls info newImportDeclStrs = Edited . Kleisli $ \importDecls' -> do
+parseMergeWithLImportDecls :: FastString -> [String] -> EditedM [LImportDecl GhcPs] ()
+parseMergeWithLImportDecls info newImportDeclStrs = EditedM . Kleisli $ \importDecls' -> EditM $ do
   newImportDecls <- liftIO $ mapM (runGHC . parseImportDecl) newImportDeclStrs
-  (runKleisli . runEdited) (mergeWithLImportDecls info newImportDecls) importDecls'
+  (fmap runEditM . runKleisli . runEditedM) (mergeWithLImportDecls info newImportDecls) importDecls'
 
 -- | Make an `Edited` that merges a list of @`ImportDecl` GhcPs`@ into another,
 -- given an information string to provide to `mkGeneralSrcSpan`
-mergeWithLImportDecls :: FastString -> [ImportDecl GhcPs] -> Edited [LImportDecl GhcPs]
-mergeWithLImportDecls info newImportDecls = Edited . Kleisli $ \xs -> execWriterT $ do
-  (>>= tell) . fmap (fmap (L (mkGeneralSrcSpan info)) . toList) . flip execStateT newImportDeclMap . forM_ xs $ \x -> do
-    newImportDeclMap' <- get
-    let xId = importId $ unLocated x
-    case Map.lookup xId newImportDeclMap' of
-      Nothing -> Control.Monad.Trans.Class.lift . tell $ [x]
-      ~(Just y) -> do
-        put $ Map.delete xId newImportDeclMap'
-        Control.Monad.Trans.Class.lift . tell $ [mergeImportDecl info (unLocated x) y <$ x]
+mergeWithLImportDecls ::
+     FastString -> [ImportDecl GhcPs] -> EditedM [LImportDecl GhcPs] ()
+mergeWithLImportDecls info newImportDecls =
+  void . EditedM . Kleisli $ \xs ->
+    EditM $ do
+      ~(addedXs, ys) <-
+        fmap (bimap (fmap (L (mkGeneralSrcSpan info)) . toList) Just) $ do
+          foldM
+            (\ ~(newImportDeclMap', imports') import' -> do
+               let importId' = getImportId $ unLocated import'
+               case Map.lookup importId' newImportDeclMap' of
+                 Nothing -> return $ (newImportDeclMap', imports' ++ [import'])
+                 ~(Just y) ->
+                   return $
+                   ( Map.delete importId' newImportDeclMap'
+                   , imports' ++
+                     [mergeImportDecl info (unLocated import') y <$ import']))
+            (newImportDeclMap, [])
+            xs
+      return . (,) () $ maybe (maybeNonEmpty addedXs) (Just . (++ addedXs)) ys
   where
-    importId :: ImportDecl GhcPs -> (Bool, Maybe Bool, Maybe StringLiteral, Maybe ModuleName, ModuleName)
-    importId = liftM5 (,,,,) ideclQualified (fmap fst . ideclHiding) ideclPkgQual (fmap unLocated . ideclAs) (unLocated . ideclName)
+    getImportId ::
+         ImportDecl GhcPs
+      -> (Bool, Maybe Bool, Maybe StringLiteral, Maybe ModuleName, ModuleName)
+    getImportId =
+      liftM5
+        (,,,,)
+        ideclQualified
+        (fmap fst . ideclHiding)
+        ideclPkgQual
+        (fmap unLocated . ideclAs)
+        (unLocated . ideclName)
 
-    newImportDeclMap :: Map (Bool, Maybe Bool, Maybe StringLiteral, Maybe ModuleName, ModuleName) (ImportDecl GhcPs)
-    newImportDeclMap = Map.fromList $ first importId . join (,) <$> newImportDecls
+    newImportDeclMap ::
+         Map ( Bool
+             , Maybe Bool
+             , Maybe StringLiteral
+             , Maybe ModuleName
+             , ModuleName) (ImportDecl GhcPs)
+    newImportDeclMap =
+      Map.fromList $ first getImportId . join (,) <$> newImportDecls
 
 -- | Apply `mergeLIEs` to the `ideclHiding`'s of two @`ImportDecl` `GhcPs`@'s,
 -- if they're both `Just`, otherwise keep the second before the first.
@@ -162,31 +179,24 @@ mergeLIE info x ~(y:ys) =
 deriving instance Ord SourceText
 deriving instance Ord StringLiteral
 
--- deriving instance Ord a => Ord (IEWrappedName a)
--- deriving instance Ord IEWildcard
--- deriving instance Ord a => Ord (FieldLbl a)
--- instance Ord HsDocString where
---   compare x y = unpackHDS x `compare` unpackHDS y
-
-
 -- | If for each `LHsDecl`, we can return an `EditM` list of them,
 -- we can edit a `HsModule`
 addLHsModDecls ::
-     (LHsDecl pass -> EditM [LHsDecl pass]) -> Edited (HsModule pass)
-addLHsModDecls = (`editConcatMapAfterM` editHsmodDecls)
+     (LHsDecl pass -> EditM a [LHsDecl pass]) -> EditedM (HsModule pass) [a]
+addLHsModDecls = (`editConcatMapAfterM` editHsModulehsmodDecls)
 
 -- | `addLHsModDecls` where each `HsDecl` is provided with
 -- a `FastString` to make a `SrcSpan` using `UnhelpfulSpan`.
 addHsModDecls ::
-     (HsDecl pass -> EditM [(FastString, HsDecl pass)])
-  -> Edited (HsModule pass)
+     (HsDecl pass -> EditM a [(FastString, HsDecl pass)])
+  -> EditedM (HsModule pass) [a]
 addHsModDecls f =
   addLHsModDecls $ (fmap . fmap) (uncurry (L . UnhelpfulSpan)) . f . unLocated
 
 -- | Lift `addHsModDecls` to accept `HsSplice`'s
 addSplices ::
-     (HsDecl GhcPs -> EditM [(FastString, HsSplice GhcPs)])
-  -> Edited (HsModule GhcPs)
+     (HsDecl GhcPs -> EditM a [(FastString, HsSplice GhcPs)])
+  -> EditedM (HsModule GhcPs) [a]
 addSplices f =
   addHsModDecls $
   (fmap . fmap)
@@ -199,30 +209,30 @@ addSplices f =
 
 -- | Lift `addSplices` to accept `TyClDecl`'s and ignore other `HsDecl`'s
 addTyClDeclSplices ::
-     (TyClDecl GhcPs -> EditM [(FastString, HsSplice GhcPs)])
-  -> Edited (HsModule GhcPs)
+     (TyClDecl GhcPs -> EditM () [(FastString, HsSplice GhcPs)])
+  -> EditedM (HsModule GhcPs) ()
 addTyClDeclSplices f =
-  addSplices $ \hsDecl' ->
+  void . addSplices $ \hsDecl' ->
     case tyClDecl hsDecl' of
-      Nothing -> empty
+      Nothing -> EditM $ return ((), Nothing)
       ~(Just tyClDecl') -> f tyClDecl'
 
 -- | Run `tyClDeclTypeName` on the `TyClDecl` in `addTyClDeclSplices`
 addTyClDeclTypeNameSplices ::
-     (TyClDeclTypeName -> Located (IdP GhcPs) -> EditM [( FastString
-                                                        , HsSplice GhcPs)])
-  -> Edited (HsModule GhcPs)
+     (TyClDeclTypeName -> Located (IdP GhcPs) -> EditM () [( FastString
+                                                           , HsSplice GhcPs)])
+  -> EditedM (HsModule GhcPs) ()
 addTyClDeclTypeNameSplices f =
   addTyClDeclSplices $ \tyClDecl' ->
     case tyClDeclTypeName tyClDecl' of
-      Nothing -> empty
+      Nothing -> EditM $ return ((), Nothing)
       ~(Just tyClDeclTypeName') -> uncurry f tyClDeclTypeName'
 
 -- | Make a splice for `addTyClDeclTypeNameSplices` by using `spliceApp`
 -- with the given TH function names, applied to each `TyClDecl` name.
 addTyClDeclTypeNameSpliceFunctions ::
-     (TyClDeclTypeName -> EditM [(FastString, IdP GhcPs)])
-  -> Edited (HsModule GhcPs)
+     (TyClDeclTypeName -> EditM () [(FastString, IdP GhcPs)])
+  -> EditedM (HsModule GhcPs) ()
 addTyClDeclTypeNameSpliceFunctions f =
   addTyClDeclTypeNameSplices $ \tyClDeclTypeName' idP' ->
     fmap (\ ~(infoStr, fId) -> (infoStr, spliceApp infoStr fId (unLocated idP'))) <$>

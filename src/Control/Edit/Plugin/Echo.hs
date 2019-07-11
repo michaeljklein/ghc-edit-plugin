@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 
 module Control.Edit.Plugin.Echo where
 
@@ -14,8 +15,9 @@ plugin =
     editedLocated
       (addTyClDeclTypeNameSplices
          (curry $
-          (>> return []) .
+          EditM .
           liftIO .
+          fmap (, Nothing) .
           putStrLn .
           ("Control.Edit.Plugin.Echo: " ++) . show . fmap (showSDocUnsafe . ppr)))
 

@@ -15,6 +15,7 @@ import Control.Edit
 import Control.Exception
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Reader
 import Data.List
 import DynFlags
 import ErrUtils
@@ -118,10 +119,10 @@ pparseIO file = do
 --
 -- The `HsModule` after any edits is returned.
 editHsModule ::
-     Edited (Located (HsModule GhcPs))
+     EditedM (Located (HsModule GhcPs)) a
   -> FilePath
-  -> Hsc (Either String (DynFlags, Located (HsModule GhcPs)))
-editHsModule (Edited (Kleisli f)) path = do
+  -> ReaderT EditCxt Hsc (Either String (DynFlags, Located (HsModule GhcPs), a))
+editHsModule (EditedM (Kleisli f)) path = do
   parseResult <- liftIO $ pparseIO path
   case parseResult of
     Left err -> return . Left . show $ (path, err)
@@ -131,12 +132,12 @@ editHsModule (Edited (Kleisli f)) path = do
           return . Left . show $
           (path, fmap (showSDoc flags) $ [wrn, err] >>= pprErrMsgBagWithLoc)
         ~(Just lHsModule) -> do
-          mUpdate <- runMaybeT $ f lHsModule
+          ~(y, mUpdate) <- runEditM $ f lHsModule
           case mUpdate of
-            Nothing -> return $ Right (flags, lHsModule)
+            Nothing -> return $ Right (flags, lHsModule, y)
             ~(Just lhsModule') -> do
               liftIO . withFile path WriteMode $ \h -> do
                 hSetEncoding h utf8
                 hPutStr h . showSDoc flags . ppr . unLocated $ lhsModule'
-              return $ Right (flags, lhsModule')
+              return $ Right (flags, lhsModule', y)
 

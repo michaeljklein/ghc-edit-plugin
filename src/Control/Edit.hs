@@ -4,90 +4,145 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Control.Edit where
 
 import Control.Applicative
-import Control.Arrow
-import Control.Monad.Trans.Class
-import Control.Monad.Trans.Maybe
-import Control.Monad.Trans.Writer
+import Control.Arrow (Kleisli(..))
 import Control.Monad
+import Control.Monad.Trans.Reader
+import Data.Bifunctor
 import Data.Maybe
 import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Set.Utils
 import GHC
 import HscTypes
-import Control.Monad.Trans.State.Strict
-import Data.Set.Utils
+import Plugins
+import qualified Data.Set as Set
 
--- | `Nothing` if no change
-type EditM = MaybeT Hsc
+-- | Context of editing a Haskell module
+data EditCxt = EditCxt
+  { ecCommandLineOptions :: [CommandLineOption]
+  , ecModSummary         :: ModSummary
+  , ecSrcFiles           :: [FilePath]
+  , ecAnnotations        :: ApiAnns
+  }
+
+-- | @a@ is the return value and @t@ is the type being edited, or `Nothing` if no change
+newtype EditM a t = EditM
+  { runEditM :: ReaderT EditCxt Hsc (a, Maybe t)
+  } deriving (Functor)
+
+-- | Don't change anything
+noEditM :: a -> EditM a t
+noEditM = EditM . ReaderT . const . return . (, Nothing)
+
+instance Bifunctor EditM where
+  bimap f g = EditM . fmap (bimap f (fmap g)) . runEditM
+  first f = EditM . fmap (first f) . runEditM
+  second = fmap
+
 
 infixr 0 >-
 -- | `Hsc` edits (return `Nothing` if not changed)
 --
 -- This type is equivalent to: @LensLike' EditM a b@
-type (>-) a b = (a -> EditM a) -> b -> EditM b
+type (>-) s t = forall a. (s -> EditM a s) -> t -> EditM a t
 
--- | A monadic endomorphism, i.e. a `Kleisli` endomorphism,
--- over `EditM`.
-newtype Edited a = Edited { runEdited :: Kleisli EditM a a }
+-- | An edit of a @t@ype, along with a return value: @a@
+newtype EditedM t a = EditedM
+  { runEditedM :: Kleisli (EditM a) t t
+  }
 
--- | This instance composes edits of the same type
-instance Semigroup (Edited a) where
-  Edited (Kleisli f) <> Edited (Kleisli g) =
-    Edited . Kleisli $ \x ->
-      MaybeT $ do
-        y <- runMaybeT $ g x
-        case y of
-          Nothing -> runMaybeT $ f x
-          ~(Just z) -> Just . fromMaybe z <$> runMaybeT (f z)
+-- | Get the `EditCxt`
+getEditedCxt :: EditedM t EditCxt
+getEditedCxt = EditedM . Kleisli . const . EditM $ (, Nothing) <$> ask
 
-instance Monoid (Edited a) where
-  mempty = Edited . Kleisli . const . MaybeT . return $ Nothing
+-- | Get the value being edited
+getEditedValue :: EditedM t t
+getEditedValue = EditedM . Kleisli $ EditM . return . (, Nothing)
 
 -- | Perform an action that may depend on the value, but don't edit anything
-effectEdited :: (a -> Hsc b) -> Edited a
-effectEdited f = Edited . Kleisli $ \x -> lift (f x) >> empty
+effectEdited :: (s -> ReaderT EditCxt Hsc a) -> EditedM s a
+effectEdited f = EditedM . Kleisli $ \x -> EditM . fmap (, Nothing) $ f x
+
+hoistKleisli :: (forall x. m x -> n x) -> Kleisli m a b -> Kleisli n a b
+hoistKleisli f = Kleisli . (f <$>) . runKleisli
+
+instance Functor (EditedM t) where
+  fmap f = EditedM . hoistKleisli (first f) . runEditedM
+
+instance Applicative (EditedM t) where
+  pure = EditedM . Kleisli . fmap (EditM . return . fmap Just) . (,)
+  EditedM (Kleisli fs) <*> EditedM (Kleisli xs) =
+    EditedM . Kleisli $ \x ->
+      EditM $ do
+        ~(f, y) <- runEditM $ fs x
+        runEditM . first f $ maybe (xs x) xs y
+
+instance Monad (EditedM t) where
+  EditedM (Kleisli xs) >>= f =
+    EditedM . Kleisli $ \x ->
+      EditM $ do
+        ~(xs', y) <- runEditM $ xs x
+        maybe
+          ((fmap runEditM . runKleisli . runEditedM $ f xs') x)
+          (fmap runEditM . runKleisli . runEditedM $ f xs')
+          y
+
+instance Semigroup a => Semigroup (EditedM t a) where
+  (<>) = liftA2 (<>)
+
+instance Monoid a => Monoid (EditedM t a) where
+  mempty = return mempty
 
 -- | Perform an edit on a `Functor`, given a F-algebra
-editedFAlg :: Functor f => (f a -> a) -> Edited a -> Edited (f a)
-editedFAlg f (Edited (Kleisli g)) = Edited . Kleisli $ \x -> MaybeT $ do
-  y <- runMaybeT $ g (f x)
-  return $ (<$ x) <$> y
+editedFAlg :: Functor f => (f s -> s) -> EditedM s a -> EditedM (f s) a
+editedFAlg f (EditedM (Kleisli g)) = EditedM . Kleisli $ \x -> EditM $ do
+  ~(y, x') <- runEditM $ g (f x)
+  return (y, (<$ x) <$> x') -- (<$ x) <$> y
 
 -- | Edit, ignoring `Located`
-editedLocated :: Edited a -> Edited (Located a)
+editedLocated :: EditedM s a -> EditedM (Located s) a
 editedLocated = editedFAlg unLocated
 
 -- | Run a `(>-)` on an `Edited`
-runEdit :: a >- b -> Edited a -> Edited b
-runEdit f = Edited . Kleisli . f . runKleisli . runEdited
+runEdit :: s >- t -> EditedM s a -> EditedM t a
+runEdit f = EditedM . Kleisli . f . runKleisli . runEditedM
 
--- | Edit a list using `patchList`
-editList :: a >- b -> a >- [b]
-editList f g xs = MaybeT $ do
-  ys <- mapM (runMaybeT . f g) xs
-  return $ patchList xs ys
+---- | Edit a list using `patchList`
+--editList :: a >- b -> a >- [b]
+--editList f g xs = EditM $ do
+--  ys <- mapM (runEditM . f g) xs
+--  _ xs ys
+--  -- return $ patchList xs ys
+--
+---- | The list to patch must be at least as long as the list to patch with
+----
+---- Equivalent to:
+----
+---- @
+---- \xs ys -> if any isJust ys
+----   then Just $ zipWith fromMaybe xs ys
+----   else Nothing
+---- @
+--patchList :: [a] -> [Maybe a] -> Maybe [a]
+--patchList [] [] = Nothing
+--patchList _  [] = Nothing
+--patchList [] _  = error "list to patch shorter than list to patch with"
+--patchList ~(x:xs) ~(y:ys) =
+--  case y of
+--    Nothing -> (x :) <$> patchList xs ys
+--    ~(Just z) -> Just $ z : zipWith fromMaybe xs ys
 
--- | The list to patch must be at least as long as the list to patch with
---
--- Equivalent to:
---
--- @
--- \xs ys -> if any isJust ys
---   then Just $ zipWith fromMaybe xs ys
---   else Nothing
--- @
-patchList :: [a] -> [Maybe a] -> Maybe [a]
-patchList [] [] = Nothing
-patchList _  [] = Nothing
-patchList [] _  = error "list to patch shorter than list to patch with"
-patchList ~(x:xs) ~(y:ys) =
-  case y of
-    Nothing -> (x :) <$> patchList xs ys
-    ~(Just z) -> Just $ z : zipWith fromMaybe xs ys
+maybeNonEmpty :: [a] -> Maybe [a]
+maybeNonEmpty = \case
+  [] -> Nothing
+  xs -> Just xs
 
 -- | Convert to index,
 -- convert from index with the previous value (unless not found in list to edit),
@@ -97,37 +152,42 @@ patchList ~(x:xs) ~(y:ys) =
 -- - Continue for all @x@
 -- - Append (prepend) remaining to list, converting with @fromIndex@
 editedMergeWithIndices ::
-     Ord i => (a -> i) -> (Maybe a -> i -> a) -> Set i -> Edited [a]
+     Ord i => (s -> i) -> (Maybe s -> i -> s) -> Set i -> EditedM [s] ()
 editedMergeWithIndices toIndex fromIndex indices =
-  Edited . Kleisli $ \xs ->
-    execWriterT $ do
-      (>>= tell) .
-        fmap (fmap (fromIndex Nothing) . Set.toAscList) .
-        flip execStateT indices . forM_ xs $ \x -> do
-        indices' <- get
+  void . EditedM . Kleisli $ \xs -> EditM $ do
+    ~(addedXs, ys) <- fmap (bimap (fmap (fromIndex Nothing) . Set.toAscList) Just) $ do
+      foldM (\ ~(indices', addedXs) x ->
         case toIndex x `lookupSetValue` indices' of
-          Nothing -> lift . tell $ [x]
+          Nothing -> return (indices', addedXs ++ [x])
           ~(Just ~(y, indices'')) -> do
-            put indices''
-            lift . tell $ [Just x `fromIndex` y]
+            return (indices'', addedXs ++ [Just x `fromIndex` y])
+        )
+        (indices, []) xs
+    return . (,) () $ maybe (maybeNonEmpty addedXs) (Just . (++ addedXs)) ys
 
 -- | Note: this simply collects edits as single edits: it's not equivalent to editList for lists
-editT :: Traversable f => a >- b -> a >- f b
-editT f g xs = mapM (f g) xs
+-- editT :: Traversable f => a >- b -> a >- f b
+-- editT f g xs = EditM . fmap _ $ mapM (runEditM . f g) xs
 
 -- | Edit by monadically inserting values after each given value
-editConcatMapAfterM :: (a -> EditM [a]) -> [a] >- b -> Edited b
+editConcatMapAfterM :: (s -> EditM a [s]) -> [s] >- t -> EditedM t [a]
 editConcatMapAfterM f g =
-  Edited . Kleisli $ \x ->
+  EditedM . Kleisli $ \x ->
     g
-      (MaybeT .
-       fmap (Just . concat) .
-       mapM (\y -> fmap ((y :) . fromMaybe []) . runMaybeT $ f y))
+      (EditM .
+       fmap
+         (fmap
+            ((\case
+                [] -> Nothing
+                xs -> Just xs) .
+             concat . catMaybes) .
+          unzip) .
+       mapM (runEditM . f))
       x
 
 -- | Edit, ignoring `Located`. (See `editedLocated`)
-editLocated :: a >- b -> a >- Located b
-editLocated = editT
+-- editLocated :: a >- b -> a >- Located b
+-- editLocated = editT
 
 -- | Drop the location of a `Located` value
 unLocated :: Located a -> a

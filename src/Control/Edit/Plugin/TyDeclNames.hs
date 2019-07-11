@@ -8,15 +8,15 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Control.Edit.Plugin.TyDeclNames where
 
+import Control.Edit
 import Control.Edit.Plugin
 import Data.Char
-import GHC (HsDecl, LHsExpr, HsBracket(VarBr), GenLocated(..), HsBindLR(VarBind),HsExpr(ExplicitList))
 import GhcPlugins hiding (Name, OccName, NameSpace)
-import HsExtension
 import Language.Haskell.TH.Syntax
-import RdrName
 
 deriving instance Lift Name
 deriving instance Lift NameFlavour
@@ -59,7 +59,7 @@ plugin :: Plugin
 plugin =
   tyClDeclTypeNameSpliceWithImports
     (mkFastString "Control.Edit.Plugin.TyDeclNames.plugin")
-    (\_ -> return (-- error "hi!" -- errors
+    (\_ -> EditM . return . (,) () . Just $ (
      [(mkFastString "Control.Edit.Plugin.TyDeclNames.mkNameDecl", mkNameDeclName)]))
     ["import Control.Edit.Plugin.TyDeclNames (mkNameDecl)"]
   where
