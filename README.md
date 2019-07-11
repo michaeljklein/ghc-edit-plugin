@@ -11,7 +11,7 @@ Create GHC plugins using composable `Lens`-like source edits.
 - `Control.Edit.Plugin` provides a method to convert an `Edited` action to a `Plugin`:
 
 ```haskell
-editToPlugin :: ([CommandLineOption] -> ModSummary -> Edited HsParsedModule) -> Plugin
+editToPlugin :: ([CommandLineOption] -> ModSummary -> EditedM HsParsedModule a) -> Plugin
 ```
 
 
@@ -22,8 +22,8 @@ with the given TH function names, applied to each `TyClDecl` name.
 
 ```haskell
 addTyClDeclTypeNameSpliceFunctions ::
-     (TyClDeclTypeName -> EditM [(FastString, IdP GhcPs)])
-  -> Edited (HsModule GhcPs)
+     (TyClDeclTypeName -> EditM () [(FastString, IdP GhcPs)])
+  -> EditedM (HsModule GhcPs) ()
 ```
 
 
